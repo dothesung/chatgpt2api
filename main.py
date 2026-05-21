@@ -23,51 +23,56 @@ app.add_middleware(
 @app.api_route("/auth/login/", methods=["POST", "OPTIONS"])
 async def vercel_login_bridge(request: Request):
     """
-    Cầu nối đăng nhập tối ưu hóa trích xuất dữ liệu thô (Raw Body Parse)
-    để giải quyết triệt để lỗi 401/500 trên môi trường Vercel Serverless.
+    Cầu nối đăng nhập đọc đồng thời cả Raw Body và Authorization Header
+    để giải quyết triệt để lỗi 401 trên Vercel Serverless.
     """
     if request.method == "OPTIONS":
         return {"status": "ok"}
 
     password = ""
-    
-    # Giải pháp đọc dữ liệu thô từ Stream để tránh việc phân tách JSON thất bại trên Vercel
-    try:
-        body_bytes = await request.body()
-        if body_bytes:
-            body_str = body_bytes.decode("utf-8")
-            # Trường hợp 1: Dữ liệu gửi lên là JSON Object (Chuẩn của Next.js)
-            if body_str.startswith("{"):
-                try:
-                    body_json = json.loads(body_str)
-                    password = body_json.get("password", "")
-                except Exception:
-                    pass
-            # Trường hợp 2: Dữ liệu gửi lên dạng Form URL Encoded hoặc Plain Text
-            elif "password=" in body_str:
-                parts = body_str.split("password=")
-                if len(parts) > 1:
-                    password = parts[1].split("&")[0]
-            else:
-                password = body_str.strip()
-    except Exception as e:
-        print(f"[Vercel Auth] Stream read error: {e}")
+
+    # Hướng xử lý 1: Đọc mật khẩu từ Header Authorization (Dựa theo curl thực tế của bạn)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        password = auth_header.split(" ")[1]
+
+    # Hướng xử lý 2: Nếu header không có, kiểm tra tiếp trong Raw Body dữ liệu gửi lên
+    if not password:
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                body_str = body_bytes.decode("utf-8")
+                if body_str.startswith("{"):
+                    try:
+                        body_json = json.loads(body_str)
+                        password = body_json.get("password", "")
+                    except Exception:
+                        pass
+                elif "password=" in body_str:
+                    parts = body_str.split("password=")
+                    if len(parts) > 1:
+                        password = parts[1].split("&")[0]
+                else:
+                    password = body_str.strip()
+        except Exception as e:
+            print(f"[Vercel Auth] Stream read error: {e}")
+
+    # Làm sạch chuỗi mật khẩu thu thập được
+    if password:
+        password = password.strip()
 
     # Lấy thông tin mật khẩu được cấu hình từ biến môi trường Vercel
     env_admin_password = os.getenv("ADMIN_PASSWORD")
     if env_admin_password:
         env_admin_password = env_admin_password.strip()
 
-    # Tạo danh sách các mật khẩu hợp lệ (Bắt cứng chuỗi cố định để dự phòng)
+    # Tạo danh sách các mật khẩu hợp lệ hệ thống chấp nhận
     valid_passwords = ["chatgpt2api", "admin"]
     if env_admin_password:
         valid_passwords.append(env_admin_password)
 
-    # Làm sạch chuỗi mật khẩu nhận được từ Frontend
-    password = password.strip()
-
     # Tiến hành kiểm tra so khớp trực tiếp
-    if password and (password in valid_passwords):
+    if password in valid_passwords:
         try:
             # Gọi auth_service gốc để cấp Token phiên làm việc vĩnh viễn
             from services.auth_service import auth_service
