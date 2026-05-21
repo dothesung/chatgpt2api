@@ -28,10 +28,6 @@
       "destination": "/main.py"
     },
     {
-      "source": "/auth/(.*)",
-      "destination": "/main.py"
-    },
-    {
       "source": "/docs",
       "destination": "/main.py"
     },
