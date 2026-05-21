@@ -9,11 +9,28 @@ import time
 
 from services.storage.base import StorageBackend
 
+# Kiểm tra môi trường Vercel Serverless
+IS_VERCEL = os.getenv("VERCEL") == "1"
+
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-CONFIG_FILE = BASE_DIR / "config.json"
+
+# Cấu hình bẻ lái thư mục ghi file vật lý sang /tmp nếu đang chạy trên Vercel
+if IS_VERCEL:
+    DATA_DIR = Path("/tmp/data")
+    CONFIG_FILE = Path("/tmp/config.json")
+    BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
+else:
+    DATA_DIR = BASE_DIR / "data"
+    CONFIG_FILE = BASE_DIR / "config.json"
+    BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
+
 VERSION_FILE = BASE_DIR / "VERSION"
-BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
+
+# Khởi tạo thư mục an toàn không gây nghẽn tiến trình khởi chạy
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    print(f"[config] Warning: Could not create DATA_DIR locally: {e}", file=sys.stderr)
 
 DEFAULT_BACKUP_INCLUDE = {
     "config": True,
@@ -143,63 +160,54 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
         return {}
     if path.is_dir():
         print(
-            f"Warning: {name} at '{path}' is a directory, ignoring it and falling back to other configuration sources.",
+            f"Warning: {name} at '{path}' is a directory, ignoring it.",
             file=sys.stderr,
         )
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _load_settings() -> LoadedSettings:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw_config = _read_json_object(CONFIG_FILE, name="config.json")
-    auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
-    if _is_invalid_auth_key(auth_key):
-        raise ValueError(
-            "❌ auth-key 未设置！\n"
-            "请在环境变量 CHATGPT2API_AUTH_KEY 中设置，或者在 config.json 中填写 auth-key。"
-        )
-
-    try:
-        refresh_interval = int(raw_config.get("refresh_account_interval_minute", 5))
-    except (TypeError, ValueError):
-        refresh_interval = 5
-
-    return LoadedSettings(
-        auth_key=auth_key,
-        refresh_account_interval_minute=refresh_interval,
-    )
 
 
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self.data = self._load()
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
-                "请按以下任意一种方式解决：\n"
-                "1. 在 Render 的 Environment 变量中添加：\n"
-                "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
-                "2. 或者在 config.json 中填写：\n"
-                '   "auth-key": "your_real_auth_key"'
+                "请 ở giao diện Environment Variables của Vercel thêm biến:\n"
+                "   API_KEY = your_real_auth_key (Ví dụ: sk-123456789)"
             )
 
     def _load(self) -> dict[str, object]:
-        return _read_json_object(self.path, name="config.json")
+        # Nạp cấu hình mặc định tương thích ngược với API_KEY trên Vercel env
+        raw = _read_json_object(self.path, name="config.json")
+        if not raw:
+            raw = {
+                "auth-key": os.getenv("API_KEY") or os.getenv("CHATGPT2API_AUTH_KEY", ""),
+                "refresh_account_interval_minute": 5,
+                "storage_backend": os.getenv("STORAGE_BACKEND", "json")
+            }
+        return raw
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception as e:
+            # Ngăn lỗi văng ra khi tệp tin phân vùng gốc bị chặn ghi trên Serverless
+            print(f"[config] Runtime notice: configuration written to memory memory only: {e}")
 
     @property
     def auth_key(self) -> str:
-        return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
+        return _normalize_auth_key(os.getenv("API_KEY") or os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
 
     @property
     def accounts_file(self) -> Path:
@@ -235,9 +243,6 @@ class ConfigStore:
 
     @property
     def image_poll_initial_wait_secs(self) -> float:
-        """Image generation upstream takes ~30s; polling immediately wastes requests
-        and trips a transient 429. Default 10s gives the conversation document time
-        to commit before the first poll."""
         try:
             return max(0.0, float(self.data.get("image_poll_initial_wait_secs", 10.0)))
         except (TypeError, ValueError):
@@ -289,18 +294,26 @@ class ConfigStore:
     @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         return path
 
     @property
     def image_thumbnails_dir(self) -> Path:
         path = DATA_DIR / "image_thumbnails"
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         return path
 
     def cleanup_old_images(self) -> int:
         cutoff = time.time() - self.image_retention_days * 86400
         removed = 0
+        if not self.images_dir.exists():
+            return 0
         for path in self.images_dir.rglob("*"):
             if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
@@ -324,9 +337,9 @@ class ConfigStore:
     def app_version(self) -> str:
         try:
             value = VERSION_FILE.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            return "0.0.0"
-        return value or "0.0.0"
+            return value or "0.1.0"
+        except Exception:
+            return "0.1.0"
 
     def get(self) -> dict[str, object]:
         data = dict(self.data)
@@ -383,7 +396,10 @@ def load_backup_state() -> dict[str, object]:
 
 def save_backup_state(state: dict[str, object]) -> dict[str, object]:
     normalized = _normalize_backup_state(state)
-    BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
     return normalized
 
 
