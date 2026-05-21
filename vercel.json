@@ -20,6 +20,14 @@
       "destination": "/main.py"
     },
     {
+      "source": "/auth/login",
+      "destination": "/main.py"
+    },
+    {
+      "source": "/auth/login/",
+      "destination": "/main.py"
+    },
+    {
       "source": "/auth/(.*)",
       "destination": "/main.py"
     },
