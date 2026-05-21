@@ -10,6 +10,14 @@
       "destination": "/main.py"
     },
     {
+      "source": "/docs",
+      "destination": "/main.py"
+    },
+    {
+      "source": "/openapi.json",
+      "destination": "/main.py"
+    },
+    {
       "source": "/(.*)",
       "destination": "/web/$1"
     }
