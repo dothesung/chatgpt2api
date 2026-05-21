@@ -23,20 +23,21 @@ app.add_middleware(
 @app.api_route("/auth/login/", methods=["POST", "OPTIONS"])
 async def vercel_login_bridge(request: Request):
     """
-    Cầu nối đăng nhập đọc đồng thời cả Raw Body và Authorization Header
-    để giải quyết triệt để lỗi 401 trên Vercel Serverless.
+    Cầu nối đăng nhập hoàn chỉnh: 
+    1. Đọc mật khẩu từ Raw Body hoặc Authorization Header.
+    2. Trả về đúng Data Structure (role, subject_id) mà Next.js Frontend yêu cầu.
     """
     if request.method == "OPTIONS":
         return {"status": "ok"}
 
     password = ""
 
-    # Hướng xử lý 1: Đọc mật khẩu từ Header Authorization (Dựa theo curl thực tế của bạn)
+    # Hướng xử lý 1: Đọc mật khẩu từ Header Authorization
     auth_header = request.headers.get("Authorization", "")
     if auth_header and auth_header.lower().startswith("bearer "):
         password = auth_header.split(" ")[1]
 
-    # Hướng xử lý 2: Nếu header không có, kiểm tra tiếp trong Raw Body dữ liệu gửi lên
+    # Hướng xử lý 2: Nếu header không có, kiểm tra tiếp trong Raw Body
     if not password:
         try:
             body_bytes = await request.body()
@@ -66,24 +67,32 @@ async def vercel_login_bridge(request: Request):
     if env_admin_password:
         env_admin_password = env_admin_password.strip()
 
-    # Tạo danh sách các mật khẩu hợp lệ hệ thống chấp nhận
+    # Tạo danh sách các mật khẩu hợp lệ
     valid_passwords = ["chatgpt2api", "admin"]
     if env_admin_password:
         valid_passwords.append(env_admin_password)
 
     # Tiến hành kiểm tra so khớp trực tiếp
     if password in valid_passwords:
+        # Cấu trúc JSON bắt buộc mà Frontend Next.js mong đợi để không bị văng ra
+        success_response = {
+            "token": "vercel_session_token",
+            "role": "admin",
+            "subject_id": "admin",
+            "name": "Admin"
+        }
+        
         try:
-            # Gọi auth_service gốc để cấp Token phiên làm việc vĩnh viễn
+            # Gọi auth_service gốc để cấp Token thực tế
             from services.auth_service import auth_service
             token = auth_service.generate_token()
-            return {"token": token, "status": "success"}
+            success_response["token"] = token
+            return success_response
         except Exception as e:
             print(f"[Vercel Auth] Storage bypass due to database start delay: {e}")
-            # Tạo chuỗi token ngẫu nhiên dự phòng nếu tầng kết nối Neon DB bị trễ (Cold Start)
             import secrets
-            fallback_token = f"sess_{secrets.token_hex(16)}"
-            return {"token": fallback_token, "status": "success"}
+            success_response["token"] = f"sess_{secrets.token_hex(16)}"
+            return success_response
             
     # Trả về mã lỗi nếu mật khẩu thực sự không trùng khớp
     raise HTTPException(status_code=401, detail="Mật khẩu nhập vào không chính xác")
